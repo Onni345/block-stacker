@@ -10,7 +10,7 @@ import time
 
 DESC = """
 Stack two blocks with Franka arm.
-Run:  mjpython main_stack.py -s pick_place_stack_no_bins.xml
+Run:  mjpython main_stack.py -s pick_place_stack.xml
 """
 
 # ---------- constants ----------
@@ -105,7 +105,7 @@ def execute_ik_precise(sim, start_pos, end_pos, quat, T, dt, gripper_val, strict
 
 # ---------- CLI ----------
 @click.command(help=DESC)
-@click.option("-s", "--sim_path", default="pick_place_stack_no_bins.xml")
+@click.option("-s", "--sim_path", default="pick_place_stack.xml")
 @click.option("-h", "--horizon", default=2, type=int, help="seconds per leg")
 @click.option("-v", "--verbose", is_flag=True, help="Print detailed info")
 def main(sim_path, horizon, verbose):
