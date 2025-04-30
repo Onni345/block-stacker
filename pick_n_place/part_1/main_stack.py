@@ -1,4 +1,3 @@
-# main_stack.py – completely rewritten block-stacking demo
 from robohive.physics.sim_scene import SimScene
 from robohive.utils.inverse_kinematics import qpos_from_site_pose
 from robohive.utils.min_jerk import generate_joint_space_min_jerk
@@ -9,7 +8,7 @@ import numpy as np
 import time
 
 DESC = """
-Stack two blocks with Franka arm.
+Stack two square blocks with Franka arm.
 Run:  mjpython main_stack.py -s pick_place_stack.xml
 """
 
@@ -23,6 +22,11 @@ GRIPPER_OPEN = 0.04            # Open gripper value
 GRIPPER_CLOSED = 0.0           # Closed gripper value
 
 # ---------- Path Planning Helpers ----------
+def stabilize_simulation(sim, steps=20, render=False):
+    """Run simulation steps to stabilize physics"""
+    for _ in range(steps):
+        sim.advance(render=render)
+
 def plan(sim, start_q, target_pos, target_quat, T, dt):
     """Generate a trajectory using inverse kinematics and min-jerk planning"""
     ik = qpos_from_site_pose(
@@ -36,10 +40,21 @@ def get_block_dimensions(sim, body_id):
     geom_id = sim.model.body_geomadr[body_id]
     return sim.model.geom_size[geom_id].copy()
 
-def stabilize_simulation(sim, steps=20, render=False):
-    """Run simulation steps to stabilize physics"""
-    for _ in range(steps):
-        sim.advance(render=render)
+def detect_contact(sim, box_bid, threshold=0.001):
+    """
+    Detect if the box has made contact with a surface
+    Returns True if contact force exceeds threshold
+    """
+    # Check contact forces for the block
+    for i in range(sim.data.ncon):
+        contact = sim.data.contact[i]
+        # Check if this block is involved in the contact
+        if (contact.geom1 in sim.model.body_geomid[box_bid] or 
+            contact.geom2 in sim.model.body_geomid[box_bid]):
+            # If there's significant contact force
+            if np.linalg.norm(contact.force) > threshold:
+                return True
+    return False
 
 def execute_ik_precise(sim, start_pos, end_pos, quat, T, dt, gripper_val, strict_xy=False):
     """
@@ -124,7 +139,7 @@ def main(sim_path, horizon, verbose):
     dt = sim.model.opt.timestep
     down_quat = np.array([0, 1, 0, 0])  # tool Z-axis down
 
-            # --- stacking state tracking ---
+    # --- stacking state tracking ---
     stack_level = 0
     cur_box_idx = 0
     first_block_placed = False
@@ -157,17 +172,23 @@ def main(sim_path, horizon, verbose):
         if stack_level == 0:
             stack_pos = stack_pos_base.copy()
         else:
-            # Get position of previous block
-            prev_bid = box_bids[cur_box_idx - 1]
-            prev_pos = sim.data.xpos[prev_bid].copy()
-            prev_dims = get_block_dimensions(sim, prev_bid)
-            
-            # Stack XY from target, Z from previous block height
-            stack_pos = np.array([
-                stack_pos_base[0],
-                stack_pos_base[1],
-                prev_pos[2] + prev_dims[2] * 2  # Top of previous block
-            ])
+            # If we need to check the previous block's position (for stacking)
+            if stack_level > 0:
+                prev_bid = box_bids[cur_box_idx - 1]
+                prev_pos = sim.data.xpos[prev_bid].copy()
+                prev_dims = get_block_dimensions(sim, prev_bid)
+                
+                # Use the ACTUAL position of previous block plus its height
+                # For square blocks, the height is the Z dimension
+                stack_pos = np.array([
+                    stack_pos_base[0],
+                    stack_pos_base[1],
+                    prev_pos[2] + prev_dims[2] * 2  # Top of previous block
+                ])
+                
+                if verbose:
+                    print(f"Previous block actual position: {prev_pos}")
+                    print(f"Stacking on top at: {stack_pos}")
         
         if verbose:
             print(f"Block position: {box_pos}")
@@ -348,68 +369,195 @@ def main(sim_path, horizon, verbose):
         
         # ---------- STAGE 6: PLACE BLOCK CAREFULLY ----------
         print("Carefully placing block...")
-
+        
         # Current position after alignment
         current_pos = sim.data.site_xpos[sim.model.site_name2id("end_effector")].copy()
-
-        # Slow descent to place block with precise XY alignment
+        
+        # Calculate a position slightly above stack target for initial descent
+        pre_place_pos = np.array([
+            stack_pos[0],
+            stack_pos[1],
+            stack_pos[2] + 0.03  # Small offset above final position
+        ])
+        
+        # First descend to just above target with strict XY
         current_q = execute_ik_precise(
             sim, 
             current_pos,
-            stack_pos,
+            pre_place_pos,
             down_quat, 
-            horizon * 2.0,  # Extra slow for precision
+            horizon * 1.5,
             dt,
             GRIPPER_CLOSED,
-            strict_xy=True  # Critical: maintain exact XY during descent
+            strict_xy=True
         )
-
-        # Hold position briefly to stabilize (reduced hold time)
-        hold_steps = int(horizon/dt * 0.05)  # Reduced from 0.2 to 0.05
-        for _ in range(hold_steps):
-            sim.data.ctrl[:ARM_NJNT] = current_q
-            sim.data.ctrl[-1] = sim.data.ctrl[-2] = GRIPPER_CLOSED
+        
+        # Now do the final descent with contact detection
+        print("Final descent with contact detection...")
+        current_pos = sim.data.site_xpos[sim.model.site_name2id("end_effector")].copy()
+        
+        # Get current block ID
+        cur_bid = box_bids[cur_box_idx]
+        
+        # Calculate total steps for final descent
+        final_descent_steps = int(horizon * 1.0 / dt)
+        step_size = (pre_place_pos[2] - stack_pos[2]) / final_descent_steps
+        
+        # Start with gripper closed
+        grip_val = GRIPPER_CLOSED
+        contact_detected = False
+        release_started = False
+        release_complete = False
+        
+        # Execute final descent with contact detection for early release
+        for i in range(final_descent_steps):
+            if sim.advance(render=True) != 0:
+                print("Simulation error occurred")
+                break
+            
+            # Current position and target
+            current_ee_pos = sim.data.site_xpos[sim.model.site_name2id("end_effector")].copy()
+            target_z = pre_place_pos[2] - (i+1) * step_size
+            target_pos = np.array([stack_pos[0], stack_pos[1], target_z])
+            
+            # Check for contact between block and target surface
+            if not contact_detected:
+                # Adjusted threshold for square blocks
+                contact_detected = detect_contact(sim, cur_bid, threshold=0.05)
+                if contact_detected:
+                    print("⚠️ Contact detected! Beginning immediate gripper release...")
+            
+            # Start opening gripper immediately upon contact
+            if contact_detected and not release_complete:
+                if not release_started:
+                    release_started = True
+                    
+                # Very rapid gripper opening over 5 steps once contact is detected
+                if release_started and grip_val > GRIPPER_OPEN:
+                    grip_val = max(GRIPPER_OPEN, grip_val - (GRIPPER_CLOSED - GRIPPER_OPEN)/5)
+                    if grip_val == GRIPPER_OPEN:
+                        release_complete = True
+                        print("🔓 Gripper fully released upon contact")
+            
+            # Perform IK for current descent position
+            ik = qpos_from_site_pose(
+                physics=sim, site_name="end_effector",
+                target_pos=target_pos, target_quat=down_quat,
+                inplace=False, regularization_strength=1.0)
+            
+            # Apply controls - maintain XY alignment throughout
+            sim.data.ctrl[:ARM_NJNT] = ik.qpos[:ARM_NJNT]
+            sim.data.ctrl[-1] = sim.data.ctrl[-2] = grip_val
+            
+            # If we've fully released, move slightly up to avoid pushing the block
+            if release_complete and i < final_descent_steps - 1:
+                # Slight upward adjustment after release
+                release_pos = np.array([
+                    stack_pos[0], 
+                    stack_pos[1], 
+                    current_ee_pos[2] + 0.005  # Small upward adjustment
+                ])
+                
+                ik = qpos_from_site_pose(
+                    physics=sim, site_name="end_effector",
+                    target_pos=release_pos, target_quat=down_quat,
+                    inplace=False, regularization_strength=1.0)
+                
+                sim.data.ctrl[:ARM_NJNT] = ik.qpos[:ARM_NJNT]
+                break  # Exit the descent loop once we've released and adjusted
+        
+        # Update current joint positions
+        current_q = sim.data.ctrl[:ARM_NJNT].copy()
+        
+        # If we didn't detect contact, ensure gripper is fully open anyway
+        if not contact_detected:
+            print("No contact detected during placement, releasing gripper...")
+            sim.data.ctrl[-1] = sim.data.ctrl[-2] = GRIPPER_OPEN
             sim.advance(render=True)
-
-        # ---------- STAGE 7: RELEASE BLOCK ----------
-        print("Releasing block...")
-
-        # Immediately open gripper completely
+        
+        # ---------- STAGE 7: RELEASE BLOCK (if not already released during placement) ----------
+        print("Ensuring block is fully released...")
+        
+        # Quick open gripper if not already fully open
+        if not (release_complete and contact_detected):
+            quick_open_steps = int(horizon/dt * 0.2)  # Very fast opening
+            for i in range(quick_open_steps):
+                open_factor = i / quick_open_steps
+                grip_val = GRIPPER_CLOSED * (1 - open_factor) + GRIPPER_OPEN * open_factor
+                
+                sim.data.ctrl[:ARM_NJNT] = current_q
+                sim.data.ctrl[-1] = sim.data.ctrl[-2] = grip_val
+                sim.advance(render=True)
+        
+        # Fully open gripper
         sim.data.ctrl[:ARM_NJNT] = current_q
         sim.data.ctrl[-1] = sim.data.ctrl[-2] = GRIPPER_OPEN
         sim.advance(render=True)
-
-        # Let the block stabilize before moving (critical for stacked blocks)
-        for _ in range(20):  # Added stabilization steps
-            sim.data.ctrl[:ARM_NJNT] = current_q
-            sim.advance(render=True)
-
+        
         # ---------- STAGE 8: RETREAT SAFELY ----------
         print("Retreating from stack...")
-
-        # Immediate vertical retreat to avoid collision
+        
+        # Add a small delay to let the block settle completely before retreating
+        for _ in range(int(horizon/dt * 0.2)):
+            sim.data.ctrl[:ARM_NJNT] = current_q
+            sim.data.ctrl[-1] = sim.data.ctrl[-2] = GRIPPER_OPEN
+            sim.advance(render=True)
+        
+        # Current position after release
         current_pos = sim.data.site_xpos[sim.model.site_name2id("end_effector")].copy()
-        retreat_height = current_pos[2] + 0.15  # Immediate upward jump
-
-        # Fast vertical retreat with strict XY
-        current_q = execute_ik_precise(
-            sim, 
-            current_pos,
-            [current_pos[0], current_pos[1], retreat_height],
-            down_quat,
-            horizon * 0.5,  # Faster retreat
-            dt,
-            GRIPPER_OPEN,
-            strict_xy=True
-        )
-
-        # Continue to home position
+        
+        # First do a quick but small vertical movement to clear the block
+        initial_retreat_pos = np.array([
+            current_pos[0],  # Keep X
+            current_pos[1],  # Keep Y
+            current_pos[2] + 0.05  # Small initial retreat
+        ])
+        
+        # Quick initial retreat 
+        for _ in range(int(horizon/dt * 0.2)):
+            # Compute IK for initial retreat
+            ik = qpos_from_site_pose(
+                physics=sim, site_name="end_effector",
+                target_pos=initial_retreat_pos, 
+                target_quat=down_quat,
+                inplace=False, 
+                regularization_strength=1.0)
+            
+            # Apply controls
+            sim.data.ctrl[:ARM_NJNT] = ik.qpos[:ARM_NJNT]
+            sim.data.ctrl[-1] = sim.data.ctrl[-2] = GRIPPER_OPEN
+            sim.advance(render=True)
+        
+        # Update current position and joint angles
+        current_pos = sim.data.site_xpos[sim.model.site_name2id("end_effector")].copy()
+        current_q = sim.data.ctrl[:ARM_NJNT].copy()
+        
+        # Now do the full retreat
+        full_retreat_pos = np.array([
+            current_pos[0],  # Keep X
+            current_pos[1],  # Keep Y
+            current_pos[2] + CLEAR_Z - 0.05  # Full retreat (accounting for initial)
+        ])
+        
+        # Execute full vertical retreat
+        retreat = plan(sim, current_q, full_retreat_pos, down_quat, horizon, dt)
+        
+        for step in retreat:
+            sim.data.ctrl[:ARM_NJNT] = step["position"]
+            sim.data.ctrl[-1] = sim.data.ctrl[-2] = GRIPPER_OPEN
+            sim.advance(render=True)
+            
+        # Update current joint angles
+        current_q = sim.data.ctrl[:ARM_NJNT].copy()
+        
+        # Then move to home position
         go_home = generate_joint_space_min_jerk(
             current_q,
             ARM_HOME,
-            horizon * 0.5,  # Faster return
+            horizon, 
             dt
         )
+        
         for step in go_home:
             sim.data.ctrl[:ARM_NJNT] = step["position"]
             sim.data.ctrl[-1] = sim.data.ctrl[-2] = GRIPPER_OPEN
@@ -453,8 +601,7 @@ def main(sim_path, horizon, verbose):
                 first_block_placed = False
                 time.sleep(1)  # Pause to see completed stack
         else:
-            print(f"❌ Failed to place block {cur_box_idx+1} correctly. Retrying.")
-            # Don't advance, retry same block
+            print(f"❌ Failed to place block {cur_box_idx+1} correctly")
             
             # If failed during the second block, don't reset first block
             if cur_box_idx == 1:

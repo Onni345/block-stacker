@@ -8,7 +8,6 @@
     <include file="../../../../simhive/franka_sim/assets/actuator0.xml"/>
     <include file="../../../../simhive/franka_sim/assets/gripper_actuator0.xml"/>
     <include file="../../../../simhive/franka_sim/assets/gripper_assets.xml"/>
-    <!-- Removed bin assets -->
 
     <compiler inertiafromgeom="auto" inertiagrouprange="3 4" angle="radian" meshdir="../../../../simhive/franka_sim" texturedir="../../../../simhive/franka_sim"/>
 
@@ -32,24 +31,22 @@
             <include file="../../../../simhive/furniture_sim/simpleTable/simpleMarbleTable_body.xml"/>
         </body>
 
-        <!-- Removed bins -->
-
         <!-- Sites -->
         <site name="pick_target" type="sphere" size="0.088" pos="0 0.5 1.25" group="1" rgba="0.1 0.8 0.2 0.4"/>
-        <site name="drop_target" type="cylinder" size="0.088 0.021" pos="-0.235 0.5 0.85" group="1" rgba="0.1 0.8 0.2 0.4"/>
-        <site name="stack_target" type="cylinder" size="0.088 0.021" pos="0.235 0.5 0.85" group="1" rgba="1 0 0 0.6"/>
+        <site name="drop_target" type="cylinder" size="0.088 0.01" pos="-0.235 0.5 0.83" group="1" rgba="0.1 0.8 0.2 0.4"/>
+        <site name="stack_target" type="cylinder" size="0.088 0.01" pos="0.235 0.5 0.83" group="1" rgba="1 0 0 0.6"/>
 
-        <!-- Blocks - Moved to table surface -->
+        <!-- Modified Blocks - Now more square-ish (0.05 x 0.05 x 0.05) -->
         <body name="box1" pos="-0.23 0.5 0.90">
             <inertial pos="0 0 0" mass="0.076" diaginertia="0.0001 0.0001 0.0001"/>
-            <geom type="box" size="0.05 0.02 0.06" rgba="0.33 0.52 0.73 1" group="1"/>
+            <geom type="box" size="0.025 0.025 0.025" rgba="0.33 0.52 0.73 1" group="1"/>
             <site name="box1_site" size="0.01" pos="0 0 0"/>
             <freejoint/>
         </body>
 
         <body name="box2" pos="-0.05 0.5 0.90">
             <inertial pos="0 0 0" mass="0.076" diaginertia="0.0001 0.0001 0.0001"/>
-            <geom type="box" size="0.05 0.02 0.06" rgba="0.85 0.45 0.35 1" group="1"/>
+            <geom type="box" size="0.025 0.025 0.025" rgba="0.85 0.45 0.35 1" group="1"/>
             <site name="box2_site" size="0.01" pos="0 0 0"/>
             <freejoint/>
         </body>
